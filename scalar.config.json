@@ -1,0 +1,24 @@
+{
+  "$schema": "https://registry.scalar.com/@scalar/schemas/config",
+  "scalar": "2.0.0",
+  "info": {
+    "title": "Joltly Public API",
+    "description": "Read-only, organization-scoped REST API for oil & gas accounts payable and revenue data."
+  },
+  "navigation": {
+    "routes": {
+      "/": {
+        "type": "group",
+        "title": "Joltly Public API",
+        "children": {
+          "/": {
+            "type": "openapi",
+            "filepath": "openapi.yml",
+            "title": "API Reference",
+            "icon": "phosphor/regular/plug"
+          }
+        }
+      }
+    }
+  }
+}
