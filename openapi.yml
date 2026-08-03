@@ -31,6 +31,8 @@ tags:
     description: JIB partners.
   - name: Vendors
     description: The accounting-system vendor master.
+  - name: Reports
+    description: Derived financial reports for BI / SQL ingestion.
 
 paths:
   /bills:
@@ -452,6 +454,61 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /profit-loss:
+    get:
+      operationId: getProfitLoss
+      tags: [Reports]
+      summary: Get the profit & loss report
+      description: >
+        The calling organization's P&L as a single derived report (not
+        paginated). Revenue comes from approved statements, expenses from coded
+        bills — a management report, not audited books. Capital spend is broken
+        out into a dedicated `capex` section and is EXCLUDED from
+        `expenses.total` and `netIncome`. A separate `cashFlow` section reports
+        money actually moved in the period (revenue received vs. bills paid),
+        independent of the accrual/interest bases. Every row carries a `byMonth`
+        map keyed by the `months` array plus a period `total`.
+      parameters:
+        - name: startDate
+          in: query
+          description: ISO 8601 date. Start of the reported window. Defaults to the first of the month 12 months ago.
+          schema: { type: string, format: date-time }
+        - name: endDate
+          in: query
+          description: ISO 8601 date. End of the reported window. Defaults to the end of the current month.
+          schema: { type: string, format: date-time }
+        - name: wellId
+          in: query
+          description: Repeatable. Restrict the report to these wells. Omit for all wells.
+          schema: { type: array, items: { type: string, maxLength: 100 } }
+          style: form
+          explode: true
+        - name: revenueDateBasis
+          in: query
+          description: Bucket revenue by production month (default) or by check date.
+          schema: { type: string, enum: [production, check], default: production }
+        - name: expenseDateBasis
+          in: query
+          description: Bucket expenses by invoice date (accrual, default) or by paid date (cash).
+          schema: { type: string, enum: [invoice, paid], default: invoice }
+        - name: interestBasis
+          in: query
+          description: Owner net interest (default) or gross 8/8 well-level values.
+          schema: { type: string, enum: [owner, eightEighths], default: owner }
+      responses:
+        "200":
+          description: The profit & loss report.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/ProfitLossReport" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
 components:
   securitySchemes:
     OrgApiKey:
@@ -787,3 +844,96 @@ components:
         code: { type: [string, "null"] }
         active: { type: [boolean, "null"] }
         lastSyncedAt: { type: [string, "null"], format: date-time }
+
+    PnlRow:
+      type: object
+      description: One report line — a per-month breakdown plus a period total.
+      required: [id, label, byMonth, total]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        byMonth:
+          type: object
+          description: Amount per month, keyed by "YYYY-MM" (matching the report's `months`).
+          additionalProperties: { type: number }
+        total: { type: number }
+
+    PnlExpenseGroup:
+      type: object
+      description: Operating-expense report group (e.g. Lease Operating Expense) with its accounts.
+      required: [name, accounts, total]
+      properties:
+        name: { type: string }
+        accounts:
+          type: array
+          items: { $ref: "#/components/schemas/PnlRow" }
+        total: { $ref: "#/components/schemas/PnlRow" }
+
+    ProfitLossReport:
+      type: object
+      required: [months, revenue, expenses, capex, netIncome, cashFlow, meta]
+      properties:
+        months:
+          type: array
+          description: '"YYYY-MM" month keys, ascending. Every row''s `byMonth` is keyed by these.'
+          items: { type: string }
+        revenue:
+          type: object
+          required: [byProduct, grossTotal, taxes, deductions, netTotal]
+          properties:
+            byProduct:
+              type: array
+              items: { $ref: "#/components/schemas/PnlRow" }
+            grossTotal: { $ref: "#/components/schemas/PnlRow" }
+            taxes: { $ref: "#/components/schemas/PnlRow" }
+            deductions: { $ref: "#/components/schemas/PnlRow" }
+            netTotal: { $ref: "#/components/schemas/PnlRow" }
+        expenses:
+          type: object
+          description: Operating expenses only. CapEx is reported separately under `capex`.
+          required: [groups, total]
+          properties:
+            groups:
+              type: array
+              items: { $ref: "#/components/schemas/PnlExpenseGroup" }
+            total: { $ref: "#/components/schemas/PnlRow" }
+        capex:
+          type: object
+          description: >
+            Capital spend broken out by account (e.g. intangible drilling,
+            tangible drilling & completion). Excluded from `expenses.total` and
+            `netIncome`.
+          required: [accounts, total]
+          properties:
+            accounts:
+              type: array
+              items: { $ref: "#/components/schemas/PnlRow" }
+            total: { $ref: "#/components/schemas/PnlRow" }
+        netIncome:
+          allOf:
+            - { $ref: "#/components/schemas/PnlRow" }
+          description: Net Revenue − Operating Expenses (excludes CapEx).
+        cashFlow:
+          type: object
+          description: >
+            Money actually moved in the period, independent of the
+            accrual/interest bases. Cash in = revenue received (statement net
+            payment by check date); cash out = bills paid (by paid date,
+            including CapEx).
+          required: [cashIn, cashOut, netCash]
+          properties:
+            cashIn: { $ref: "#/components/schemas/PnlRow" }
+            cashOut: { $ref: "#/components/schemas/PnlRow" }
+            netCash: { $ref: "#/components/schemas/PnlRow" }
+        meta:
+          type: object
+          description: The resolved parameters this report was computed with.
+          properties:
+            startDate: { type: string, format: date-time }
+            endDate: { type: string, format: date-time }
+            wellIds:
+              type: [array, "null"]
+              items: { type: string }
+            revenueDateBasis: { type: string, enum: [production, check] }
+            expenseDateBasis: { type: string, enum: [invoice, paid] }
+            interestBasis: { type: string, enum: [owner, eightEighths] }
