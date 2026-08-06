@@ -1,11 +1,13 @@
 openapi: 3.1.0
 info:
   title: Joltly Public API
-  version: "1.0.0"
+  version: "1.1.0"
   description: >
-    Read-only REST API for pulling your organization's data out of Joltly —
-    bills, revenue statements, cost centers, wells, JIBs, partners, and
-    vendors. Server-to-server only; authenticate with an organization API key.
+    REST API for your organization's data in Joltly — bills (including line
+    coding writes), revenue statements, GL accounts, cost centers, wells,
+    JIBs, partners, and vendors. Server-to-server only; authenticate with an
+    organization API key. Payment schedule/execute/approve stay in the Joltly
+    web app.
   contact:
     name: Joltly Support
     url: https://joltly.io
@@ -18,7 +20,12 @@ security:
 
 tags:
   - name: Bills
-    description: Accounts-payable bills with coded line items.
+    description: >
+      Accounts-payable bills with coded line items. Supports coding writes,
+      notes, hold (do-not-pay), soft delete, submit-for-approval, and sync
+      retry. Approval and payment execution remain in the Joltly app.
+  - name: GL Accounts
+    description: Chart of accounts used when coding bill line items.
   - name: Revenue Statements
     description: Oil & gas revenue statements and their line items.
   - name: Cost Centers
@@ -111,6 +118,131 @@ paths:
                   data: { $ref: "#/components/schemas/Bill" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /bills/{id}/line-items:
+    put:
+      operationId: replaceBillLineItems
+      tags: [Bills]
+      summary: Replace bill line-item coding
+      description: >
+        Full-replace line coding (GL + cost center). Line amounts must sum to
+        the bill `totalAmount` (error names the delta). `dryRun: true` validates
+        without writing. A successful commit triggers accounting re-sync
+        (ODA/QuickBooks). Rejected for PAID / PAYMENT_PROCESSING / APPROVED
+        unless `force` is set. Does not approve or schedule payment.
+      parameters:
+        - { $ref: "#/components/parameters/idPath" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplaceBillLineItemsRequest" }
+      responses:
+        "200":
+          description: Validation preview (dryRun) or updated bill after commit.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/CodeBillResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /bills/{id}/actions:
+    post:
+      operationId: billAction
+      tags: [Bills]
+      summary: Run a bill action
+      description: >
+        Curated write actions for agents and integrations. Supported actions:
+        `add_note`, `hold` (do-not-pay + reason), `delete` (soft/cancel),
+        `submit_for_approval`, `retry_sync`. Payment schedule/execute/approve
+        are not available here.
+      parameters:
+        - { $ref: "#/components/parameters/idPath" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BillActionRequest" }
+      responses:
+        "200":
+          description: Action result (may be a dry-run preview).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /bills/{id}/coding-suggestions:
+    get:
+      operationId: getBillCodingSuggestions
+      tags: [Bills]
+      summary: Suggest bill coding
+      description: >
+        Ranked GL + cost-center suggestions from historical lines for the same
+        vendor, plus BAML/extraction suggestions already on the bill.
+      parameters:
+        - { $ref: "#/components/parameters/idPath" }
+      responses:
+        "200":
+          description: Coding suggestions and extraction metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/BillCodingSuggestions" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /gl-accounts:
+    get:
+      operationId: listGlAccounts
+      tags: [GL Accounts]
+      summary: List GL accounts
+      description: >
+        Chart of accounts for coding bills. Use before writing line items to
+        resolve a name or code (e.g. "insurance") to an id.
+      parameters:
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+        - name: q
+          in: query
+          description: Case-insensitive name or code substring.
+          schema: { type: string, maxLength: 200 }
+        - name: active
+          in: query
+          description: When true, only active non-deleted accounts.
+          schema: { type: string, enum: ["true", "false"] }
+      responses:
+        "200":
+          description: A page of GL accounts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/GlAccount" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
   /revenue-statements:
@@ -612,6 +744,15 @@ components:
         accountNumber: { type: [string, "null"] }
         name: { type: [string, "null"] }
 
+    GlAccount:
+      type: object
+      properties:
+        id: { type: string }
+        code: { type: string }
+        name: { type: string }
+        accountType: { type: [string, "null"] }
+        active: { type: boolean }
+
     WellRef:
       type: [object, "null"]
       properties:
@@ -619,6 +760,14 @@ components:
         name: { type: [string, "null"] }
         code: { type: [string, "null"] }
         apiNumber: { type: [string, "null"] }
+
+    CostCenterRef:
+      type: [object, "null"]
+      properties:
+        id: { type: string }
+        type: { $ref: "#/components/schemas/CostCenterType" }
+        name: { type: [string, "null"] }
+        code: { type: [string, "null"] }
 
     ProductRef:
       type: [object, "null"]
@@ -642,26 +791,150 @@ components:
         deductionDate: { type: [string, "null"], format: date-time }
         paidAt: { type: [string, "null"], format: date-time }
         achTraceNumber: { type: [string, "null"] }
+        assignedTo:
+          type: [string, "null"]
+          description: Next approver / assigned user id when present.
+        doNotPay: { type: boolean }
+        doNotPayReason: { type: [string, "null"] }
+        openInJoltly:
+          type: string
+          description: Authenticated deep link to the bill review workspace.
         accountingSync:
           type: object
           properties:
             status: { type: [string, "null"] }
+            message:
+              type: [string, "null"]
+              description: Last sync error detail when status is failed.
             externalBillId: { type: [string, "null"] }
             isPosted: { type: [boolean, "null"] }
             lastStatusAt: { type: [string, "null"], format: date-time }
         lineItems:
           type: array
+          description: Always present; empty array means honestly uncoded.
           items: { $ref: "#/components/schemas/BillLineItem" }
 
     BillLineItem:
       type: object
       properties:
-        id: { type: string }
+        id:
+          type: string
+          description: Stable line key used when writing coding updates.
         description: { type: [string, "null"] }
         amount: { type: [number, "null"] }
         categoryType: { type: [string, "null"] }
         glAccount: { $ref: "#/components/schemas/GlAccountRef" }
         well: { $ref: "#/components/schemas/WellRef" }
+        costCenter: { $ref: "#/components/schemas/CostCenterRef" }
+        codingSource:
+          type: [string, "null"]
+          description: Provenance from extraction / history / manual (e.g. ai, historical).
+        codingConfidence: { type: [number, "null"] }
+        codingReasoning: { type: [string, "null"] }
+        suggestedCoding:
+          type: [object, "null"]
+          properties:
+            glAccountId: { type: [string, "null"] }
+            wellOrAfeId: { type: [string, "null"] }
+            alreadyApplied: { type: boolean }
+
+    ReplaceBillLineItemsRequest:
+      type: object
+      required: [lineItems]
+      properties:
+        dryRun:
+          type: boolean
+          default: false
+          description: When true, validate and preview without writing.
+        force:
+          type: boolean
+          default: false
+          description: Override locked-status gates (audited; use sparingly).
+        lineItems:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            type: object
+            required: [glAccountId, amount]
+            properties:
+              id:
+                type: [string, "null"]
+                description: Existing line id from GET /bills/{id}; omit to assign by order.
+              glAccountId: { type: string }
+              costCenterId:
+                type: [string, "null"]
+                description: Well, field, or operating group id from /cost-centers.
+              amount: { type: number }
+              memo: { type: [string, "null"] }
+
+    CodeBillResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        dryRun: { type: boolean }
+        wouldChange: { type: boolean }
+        preview:
+          type: object
+          properties:
+            lineCount: { type: integer }
+            totalAmount: { type: number }
+            billTotalAmount: { type: number }
+            summary: { type: string }
+        bill: { $ref: "#/components/schemas/Bill" }
+        warnings:
+          type: array
+          items: { type: string }
+
+    BillActionRequest:
+      oneOf:
+        - type: object
+          required: [action, text]
+          properties:
+            action: { type: string, enum: [add_note] }
+            text: { type: string, maxLength: 5000 }
+            dryRun: { type: boolean, default: false }
+        - type: object
+          required: [action, reason]
+          properties:
+            action: { type: string, enum: [hold] }
+            reason: { type: string, maxLength: 2000 }
+            dryRun: { type: boolean, default: false }
+        - type: object
+          required: [action]
+          properties:
+            action: { type: string, enum: [delete, retry_sync] }
+            dryRun: { type: boolean, default: false }
+        - type: object
+          required: [action]
+          properties:
+            action: { type: string, enum: [submit_for_approval] }
+            approverId: { type: string, maxLength: 100 }
+            dryRun: { type: boolean, default: false }
+
+    BillCodingSuggestions:
+      type: object
+      properties:
+        billId: { type: string }
+        vendorName: { type: [string, "null"] }
+        totalAmount: { type: [number, "null"] }
+        openInJoltly: { type: string }
+        suggestions:
+          type: array
+          items:
+            type: object
+            properties:
+              glAccountId: { type: [string, "null"] }
+              costCenterId: { type: [string, "null"] }
+              costCenterType: { type: [string, "null"] }
+              glLabel: { type: [string, "null"] }
+              costCenterLabel: { type: [string, "null"] }
+              confidence: { type: number }
+              evidence: { type: string }
+              priorCount: { type: integer }
+        extraction:
+          type: array
+          items: { type: object, additionalProperties: true }
 
     RevenueStatementSummary:
       type: object
