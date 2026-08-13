@@ -1,13 +1,14 @@
 openapi: 3.1.0
 info:
   title: Joltly Public API
-  version: "1.1.0"
+  version: "1.2.0"
   description: >
     REST API for your organization's data in Joltly — bills (including line
     coding writes), revenue statements, GL accounts, cost centers, wells,
-    JIBs, partners, and vendors. Server-to-server only; authenticate with an
-    organization API key. Payment schedule/execute/approve stay in the Joltly
-    web app.
+    JIBs, partners, vendors, and the synced bank ledger. Server-to-server
+    only; authenticate with an organization API key or a user access token.
+    Payment schedule/execute stay in the Joltly web app. Bank endpoints read
+    already-synced transactions and never call Plaid.
   contact:
     name: Joltly Support
     url: https://joltly.io
@@ -40,6 +41,12 @@ tags:
     description: The accounting-system vendor master.
   - name: Reports
     description: Derived financial reports for BI / SQL ingestion.
+  - name: Banking
+    description: >
+      Synced customer bank accounts and ledger (Plaid transactions already
+      stored in Joltly). Never calls Plaid. Hides Joltly platform treasury.
+      Matching confirm/reject, live balance refresh, and link/unlink are not
+      available.
 
 paths:
   /bills:
@@ -586,6 +593,138 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /bank-accounts:
+    get:
+      operationId: listBankAccounts
+      tags: [Banking]
+      summary: List connected bank accounts
+      description: >
+        Customer bank accounts already linked and synced for this organization.
+        Hides inactive, deleted, and Joltly platform-treasury accounts.
+        `latestBalance` is the last stored snapshot — not a live Plaid call.
+      parameters:
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/updatedSince" }
+      responses:
+        "200":
+          description: A page of bank accounts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/BankAccount" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /bank-transactions:
+    get:
+      operationId: listBankTransactions
+      tags: [Banking]
+      summary: List bank transactions
+      description: >
+        Synced bank ledger rows for this organization (already stored
+        BankTransaction records). Amount is absolute; `direction` is CREDIT
+        (money in) or DEBIT (money out). Does not call Plaid.
+      parameters:
+        - { $ref: "#/components/parameters/limit" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/updatedSince" }
+        - name: accountId
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: direction
+          in: query
+          schema: { type: string, enum: [CREDIT, DEBIT] }
+        - name: matchStatus
+          in: query
+          schema: { type: string, enum: [matched, suggested, unmatched, excluded] }
+        - name: dateFrom
+          in: query
+          schema: { type: string, format: date-time }
+        - name: dateTo
+          in: query
+          schema: { type: string, format: date-time }
+        - name: q
+          in: query
+          description: Case-insensitive name or merchant search.
+          schema: { type: string, maxLength: 200 }
+      responses:
+        "200":
+          description: A page of bank transactions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/BankTransaction" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /bank-transactions/{id}:
+    get:
+      operationId: getBankTransaction
+      tags: [Banking]
+      summary: Get a bank transaction
+      parameters:
+        - { $ref: "#/components/parameters/idPath" }
+      responses:
+        "200":
+          description: The bank transaction, including slim matches.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/BankTransaction" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /bank-activity:
+    get:
+      operationId: getBankActivity
+      tags: [Banking]
+      summary: Summarize bank activity
+      description: >
+        Credits, debits, net, and unmatched counts over the synced ledger.
+        Defaults to the last 30 days. Never calls Plaid.
+      parameters:
+        - name: dateFrom
+          in: query
+          schema: { type: string, format: date-time }
+        - name: dateTo
+          in: query
+          schema: { type: string, format: date-time }
+        - name: accountId
+          in: query
+          schema: { type: string, maxLength: 100 }
+      responses:
+        "200":
+          description: Bank activity rollup.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/BankActivitySummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /profit-loss:
     get:
       operationId: getProfitLoss
@@ -1117,6 +1256,111 @@ components:
         code: { type: [string, "null"] }
         active: { type: [boolean, "null"] }
         lastSyncedAt: { type: [string, "null"], format: date-time }
+
+    BankAccount:
+      type: object
+      description: A customer bank account already linked in Joltly. Plaid tokens are never exposed.
+      properties:
+        id: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        institutionName: { type: [string, "null"] }
+        accountName: { type: [string, "null"] }
+        mask: { type: [string, "null"] }
+        accountType: { type: [string, "null"] }
+        accountSubtype: { type: [string, "null"] }
+        lastSeenAt: { type: [string, "null"], format: date-time }
+        latestBalance:
+          type: [object, "null"]
+          properties:
+            current: { type: [number, "null"] }
+            available: { type: [number, "null"] }
+            asOf: { type: [string, "null"], format: date-time }
+            currency: { type: [string, "null"] }
+        openInJoltly: { type: string }
+
+    BankTransaction:
+      type: object
+      description: >
+        One synced ledger row. `amount` is absolute; `direction` carries the sign.
+        `matchStatus` is derived (matched / suggested / unmatched / excluded).
+      properties:
+        id: { type: string }
+        date: { type: string, format: date-time }
+        authorizedDate: { type: [string, "null"], format: date-time }
+        amount: { type: number }
+        direction: { type: string, enum: [CREDIT, DEBIT] }
+        name: { type: string }
+        merchantName: { type: [string, "null"] }
+        category: { type: [string, "null"] }
+        checkNumber: { type: [string, "null"] }
+        pending: { type: boolean }
+        currency: { type: string }
+        excluded: { type: boolean }
+        matchStatus: { type: string, enum: [matched, suggested, unmatched, excluded] }
+        account:
+          type: [object, "null"]
+          properties:
+            id: { type: string }
+            institutionName: { type: [string, "null"] }
+            accountName: { type: [string, "null"] }
+            mask: { type: [string, "null"] }
+            accountType: { type: [string, "null"] }
+            accountSubtype: { type: [string, "null"] }
+        matches:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              status: { type: string }
+              matchType: { type: string }
+              amountApplied: { type: [number, "null"] }
+              confidence: { type: [number, "null"] }
+              bill:
+                type: [object, "null"]
+                properties:
+                  id: { type: string }
+                  invoiceNumber: { type: [string, "null"] }
+                  openInJoltly: { type: string }
+              revenueStatement: { type: [object, "null"] }
+              paymentIntent: { type: [object, "null"] }
+              mailedCheck: { type: [object, "null"] }
+              invoice: { type: [object, "null"] }
+        openInJoltly: { type: string }
+
+    BankActivitySummary:
+      type: object
+      properties:
+        dateFrom: { type: string, format: date-time }
+        dateTo: { type: string, format: date-time }
+        transactionCount: { type: integer }
+        pendingCount: { type: integer }
+        excludedCount: { type: integer }
+        credits: { type: number }
+        debits: { type: number }
+        net: { type: number }
+        unmatched:
+          type: object
+          properties:
+            credits: { type: integer }
+            creditAmount: { type: number }
+            debits: { type: integer }
+            debitAmount: { type: number }
+        byAccount:
+          type: array
+          items:
+            type: object
+            properties:
+              accountId: { type: string }
+              institutionName: { type: [string, "null"] }
+              accountName: { type: [string, "null"] }
+              mask: { type: [string, "null"] }
+              credits: { type: number }
+              debits: { type: number }
+              unmatchedCredits: { type: integer }
+              unmatchedDebits: { type: integer }
+        openInJoltly: { type: string }
 
     PnlRow:
       type: object
