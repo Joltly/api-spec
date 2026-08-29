@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Joltly Public API
-  version: "1.2.0"
+  version: "1.3.0"
   description: >
     REST API for your organization's data in Joltly — bills (including line
     coding writes), revenue statements, GL accounts, cost centers, wells,
@@ -38,7 +38,13 @@ tags:
   - name: Partners
     description: JIB partners.
   - name: Vendors
-    description: The accounting-system vendor master.
+    description: >
+      The accounting-system vendor master, plus consolidated remittance
+      advice for bills already paid to a vendor.
+  - name: Approvers
+    description: >
+      The organization's users, as approval routing sees them. Read-only —
+      membership and roles are managed in the Joltly app.
   - name: Reports
     description: Derived financial reports for BI / SQL ingestion.
   - name: Banking
@@ -73,7 +79,37 @@ paths:
           schema: { type: string, format: date-time }
         - name: paymentStatus
           in: query
-          schema: { type: string, maxLength: 50 }
+          description: >
+            Comma-separated list of statuses to include. Values are matched
+            case-sensitively against the statuses the product actually
+            produces (INBOX, READY_FOR_REVIEW, APPROVED, PAYMENT_SCHEDULED,
+            PAYMENT_PROCESSING, PAYMENT_IN_TRANSIT, PAYMENT_FAILED, PAID,
+            CANCELED, ARCHIVED) — an invented status such as `UNPAID` filters
+            to zero rows rather than erroring.
+          schema: { type: string, maxLength: 300 }
+        - name: excludePaymentStatus
+          in: query
+          description: >
+            Comma-separated statuses to omit. Applied after `paymentStatus`.
+            Bills with no status set are kept, so excluding `PAID` returns
+            open AP rather than only bills whose status is explicitly set.
+          schema: { type: string, maxLength: 300 }
+        - name: minAmount
+          in: query
+          description: Inclusive lower bound on `totalAmount`, in USD.
+          schema: { type: number }
+        - name: maxAmount
+          in: query
+          description: Inclusive upper bound on `totalAmount`, in USD.
+          schema: { type: number }
+        - name: includeSettlement
+          in: query
+          description: >
+            Pass `true` to add the `payment` object to every row. Off by
+            default because it costs a bank-ledger lookup per bill. A `PAID`
+            bill with `payment.settledAt: null` is a real signal — nothing in
+            the ledger corroborates the payment — not a missing field.
+          schema: { type: string, enum: ["true", "false"] }
         - name: vendorName
           in: query
           description: Case-insensitive substring match.
@@ -216,6 +252,59 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /bills/{id}/attachments:
+    get:
+      operationId: getBillAttachments
+      tags: [Bills]
+      summary: List a bill's attachments
+      description: >
+        The invoice PDF plus any supplementary files. URLs are time-limited
+        and are not stable identifiers — re-read this endpoint rather than
+        storing them.
+      parameters:
+        - { $ref: "#/components/parameters/idPath" }
+      responses:
+        "200":
+          description: Attachment URLs for the bill.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/BillAttachments" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /bills/{id}/duplicates:
+    get:
+      operationId: getBillDuplicates
+      tags: [Bills]
+      summary: Find duplicate candidates for a bill
+      description: >
+        Other bills in the same organization that may be the same invoice,
+        found either by an exact invoice-number collision or by a
+        vendor-and-amount match. Candidates only — a match here is a prompt to
+        look, never grounds to cancel a bill automatically. Canceled,
+        archived, and previously dismissed bills are excluded, and at most
+        five matches are returned.
+      parameters:
+        - { $ref: "#/components/parameters/idPath" }
+      responses:
+        "200":
+          description: Duplicate candidates. `matches` is empty when none are found.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/BillDuplicates" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /gl-accounts:
     get:
       operationId: listGlAccounts
@@ -315,6 +404,46 @@ paths:
                   data: { $ref: "#/components/schemas/RevenueStatementDetail" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /revenue-statements/missing:
+    get:
+      operationId: getMissingRevenueStatements
+      tags: [Revenue Statements]
+      summary: Summarize outstanding revenue statements
+      description: >
+        Purchasers who owe a revenue statement, grouped by purchaser rather
+        than by month because that is the unit of action — one purchaser
+        owing six months is one phone call, not six.
+
+
+        Read `paidNoStatement` as the trustworthy subset: money landed in the
+        bank and nothing was filed against it. The wider `purchasers` list
+        also includes cadence inferences, which are a prediction rather than
+        a fact.
+
+
+        `unattributedDeposits` is always present, including when it is zero,
+        because check and cash deposits carry no payer name — a purchaser who
+        pays by check will never appear as a row here. Do not present this
+        response as a complete picture without reading it.
+      parameters:
+        - name: months
+          in: query
+          description: Lookback window in months, 1–24. Defaults to 6.
+          schema: { type: integer, minimum: 1, maximum: 24, default: 6 }
+      responses:
+        "200":
+          description: Outstanding-statement rollup. Not paginated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/MissingStatementsSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
   /cost-centers:
@@ -593,6 +722,87 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /vendors/{id}/remittance-advice:
+    post:
+      operationId: sendVendorRemittanceAdvice
+      tags: [Vendors]
+      summary: Build or send a remittance advice
+      description: >
+        Builds one consolidated remittance advice covering several bills paid
+        to this vendor, and with `dryRun: false` emails it.
+
+
+        **`dryRun` defaults to `true`.** This is the only write in the API
+        that leaves the building, so an omitted flag never means "send". The
+        intended shape is: call once to show the operator the exact `html`
+        and `text` that would go out, get a yes, then repeat the call with
+        `dryRun: false`. The document is not rebuilt between the two calls in
+        any way that could change its content, and the response body is
+        identical apart from the `sent` block.
+
+
+        Dates quoted are settlement dates from the bank ledger, never
+        `bill.paidAt` — see the `payment` object on `Bill`. Any line the bank
+        does not corroborate carries a `caveat` and is counted in
+        `unconfirmedCount`; `confirmedAmount` is the portion that is safe to
+        assert to a third party.
+      parameters:
+        - { $ref: "#/components/parameters/idPath" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RemittanceAdviceRequest" }
+      responses:
+        "200":
+          description: >
+            The built advice. `sent` is `false` on a dry run and reflects the
+            real outcome otherwise.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/RemittanceAdvice" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: >
+            The advice was built but could not be sent because the vendor has
+            no remittance email on file. Add one to the vendor record, or pass
+            `recipientEmail`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /approvers:
+    get:
+      operationId: listApprovers
+      tags: [Approvers]
+      summary: List the organization's approvers
+      description: >
+        The organization's users, as bill approval routing sees them. Use this
+        to resolve a `Bill.assignedTo` id to a person. Not paginated —
+        `pagination.nextCursor` is always `null`.
+      responses:
+        "200":
+          description: Every user in the organization, sorted by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Approver" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /bank-accounts:
     get:
       operationId: listBankAccounts
@@ -780,6 +990,66 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /spend-summary:
+    get:
+      operationId: getSpendSummary
+      tags: [Reports]
+      summary: Summarize spend by vendor, well, or GL account
+      description: >
+        Totals coded bill line items over a date window, grouped one way. Use
+        this rather than paging `/bills` and adding the amounts up yourself —
+        this aggregates server-side over every line in range, so the answer
+        does not quietly depend on how many pages the caller fetched.
+
+
+        Line items are bucketed by their own `invoiceDate`. Uncoded lines
+        still count, under `(no vendor)` / `(not well-coded)` / `(uncoded)`.
+        Bills in range that have no line items at all cannot be grouped, so
+        they are excluded and counted in `excludedBillCount` — a non-zero
+        value there means `grandTotal` is lower than true spend.
+      parameters:
+        - name: groupBy
+          in: query
+          required: true
+          description: The single dimension to total against.
+          schema: { type: string, enum: [vendor, well, glAccount] }
+        - name: dateFrom
+          in: query
+          required: true
+          description: Inclusive start of the window, matched against line-item invoice date.
+          schema: { type: string, format: date-time }
+        - name: dateTo
+          in: query
+          required: true
+          description: Inclusive end of the window.
+          schema: { type: string, format: date-time }
+        - name: vendorName
+          in: query
+          description: Case-insensitive substring filter applied before grouping.
+          schema: { type: string, maxLength: 200 }
+        - name: wellId
+          in: query
+          description: Restrict to lines coded to this well.
+          schema: { type: string, maxLength: 100 }
+      responses:
+        "200":
+          description: The spend rollup. Not paginated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/SpendSummary" }
+        "400":
+          description: >
+            Invalid parameters — including `dateFrom` later than `dateTo`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
 components:
   securitySchemes:
     OrgApiKey:
@@ -918,18 +1188,45 @@ components:
       type: object
       properties:
         id: { type: string }
+        organizationId:
+          type: string
+          description: >
+            Owning organization. Carried on the row rather than the envelope
+            because a key with access to several organizations gets one
+            interleaved page.
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         invoiceNumber: { type: [string, "null"] }
         invoiceDate: { type: [string, "null"], format: date-time }
+        dueDate:
+          type: [string, "null"]
+          format: date-time
+          description: >
+            Vendor's stated due date as captured from the invoice. Null when
+            the invoice did not state one — it is not derived from terms.
         vendorName: { type: [string, "null"] }
         totalAmount: { type: [number, "null"] }
         paymentStatus: { type: [string, "null"] }
         paymentMethod: { type: [string, "null"] }
         scheduledAt: { type: [string, "null"], format: date-time }
         deductionDate: { type: [string, "null"], format: date-time }
-        paidAt: { type: [string, "null"], format: date-time }
+        paidAt:
+          type: [string, "null"]
+          format: date-time
+          description: >
+            When Joltly observed the status change — a bookkeeping stamp, not
+            when money moved. For anything vendor-facing read
+            `payment.settledAt` instead.
+        statusUpdatedAt:
+          type: [string, "null"]
+          format: date-time
+          description: Same value as `paidAt`, under the name that describes it.
         achTraceNumber: { type: [string, "null"] }
+        payment:
+          description: >
+            Settlement as the bank ledger tells it. Present on the detail
+            endpoint, and on list rows only when `includeSettlement=true`.
+          $ref: "#/components/schemas/BillSettlement"
         assignedTo:
           type: [string, "null"]
           description: Next approver / assigned user id when present.
@@ -1074,6 +1371,314 @@ components:
         extraction:
           type: array
           items: { type: object, additionalProperties: true }
+
+    BillSettlement:
+      type: [object, "null"]
+      description: >
+        What the bank ledger — or, failing that, the payment provider — says
+        about this bill actually settling. A `PAID` bill whose `settledAt` is
+        `null` is not a gap in the data: it means nothing corroborates the
+        payment, and it should be shown to an operator rather than smoothed
+        over with `paidAt`.
+      properties:
+        settledAt:
+          type: [string, "null"]
+          format: date-time
+          description: The date money actually moved, per `source`.
+        source:
+          type: [string, "null"]
+          enum: [bank_ledger, transfer_record, null]
+          description: >
+            `bank_ledger` is a matched transaction on a synced account and is
+            the strongest evidence. `transfer_record` is Joltly's own record
+            of an origination — good, but not independent confirmation.
+        reference: { type: [string, "null"] }
+        bankTransactionId: { type: [string, "null"] }
+        bankAccount:
+          type: [string, "null"]
+          description: Display name of the account the money left, when known.
+        bankAmount: { type: [number, "null"] }
+        matchStatus:
+          type: [string, "null"]
+          enum: [matched, suggested, null]
+          description: >
+            `suggested` means Joltly proposed this bank transaction but no one
+            has confirmed it. Do not quote a `suggested` settlement to a
+            vendor as fact.
+
+    BillAttachments:
+      type: object
+      properties:
+        billId: { type: string }
+        pdfUrl:
+          type: [string, "null"]
+          description: The invoice document. Null when none was ever attached.
+        attachments:
+          type: array
+          description: Supplementary files. Empty when there are none.
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              url:
+                type: string
+                description: Time-limited download URL. Re-read rather than storing.
+              fileName: { type: string }
+              contentType: { type: string }
+              size: { type: integer, description: Bytes. }
+              uploadedAt: { type: [string, "null"], format: date-time }
+        openInJoltly: { type: string }
+
+    BillDuplicates:
+      type: object
+      properties:
+        billId: { type: string }
+        matchType:
+          type: [string, "null"]
+          enum: [exact_invoice_number, vendor_amount, null]
+          description: >
+            How the candidates were found, or `null` when there are none.
+            `vendor_amount` is the weaker signal — recurring monthly charges
+            from one vendor legitimately repeat.
+        matches:
+          type: array
+          description: At most five, and empty when nothing matched.
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              invoiceNumber: { type: [string, "null"] }
+              vendorName: { type: string }
+              amount: { type: [number, "null"] }
+              status: { type: string }
+              invoiceDate: { type: [string, "null"] }
+              openInJoltly: { type: string }
+        openInJoltly: { type: string }
+
+    RemittanceAdviceRequest:
+      type: object
+      required: [billIds]
+      properties:
+        billIds:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: Bills to include. All must belong to this vendor.
+          items: { type: string, minLength: 1, maxLength: 100 }
+        dryRun:
+          type: boolean
+          default: true
+          description: >
+            Defaults to `true`. Set `false` only after a human has seen the
+            built document — an omitted flag must never mean "send".
+        recipientEmail:
+          type: string
+          format: email
+          maxLength: 320
+          description: Overrides the vendor's remittance address for this send.
+        ccEmails:
+          type: array
+          maxItems: 10
+          items: { type: string, format: email, maxLength: 320 }
+        personalNote:
+          type: string
+          maxLength: 2000
+          description: Free text placed in the body above the payment table.
+
+    RemittanceAdvice:
+      type: object
+      properties:
+        organizationId: { type: string }
+        orgName: { type: string }
+        vendorId: { type: [string, "null"] }
+        vendorName: { type: string }
+        recipientEmail:
+          type: [string, "null"]
+          description: Null means there is nowhere to send it.
+        recipientSource:
+          type: [string, "null"]
+          enum:
+            - explicit_override
+            - vendor_remittance_email
+            - vendor_notification_email
+            - null
+        lines:
+          type: array
+          items: { $ref: "#/components/schemas/RemittanceAdviceLine" }
+        totalAmount: { type: number }
+        confirmedAmount:
+          type: number
+          description: >
+            The portion the bank corroborates. Quote this, not `totalAmount`,
+            when asserting payment to a third party.
+        unconfirmedCount:
+          type: integer
+          description: Lines carrying a `caveat`.
+        subject: { type: string }
+        text:
+          type: string
+          description: Plain-text rendering, for pasting into an existing thread.
+        html:
+          type: string
+          description: Exactly the HTML a send would deliver.
+        warnings:
+          type: array
+          items: { type: string }
+        dryRun: { type: boolean }
+        sent:
+          type: boolean
+          description: >
+            Always present, and always `false` on a dry run. "Would send" and
+            "did send" are never told apart by a missing field.
+        wouldSendTo:
+          type: [string, "null"]
+          description: Present on a dry run only.
+        sentTo:
+          type: [string, "null"]
+          description: Present on a real send only.
+        messageId: { type: [string, "null"] }
+        skipped:
+          type: string
+          description: Present only when a real send was declined, and why.
+
+    RemittanceAdviceLine:
+      type: object
+      properties:
+        billId: { type: string }
+        invoiceNumber: { type: [string, "null"] }
+        invoiceDate: { type: [string, "null"], format: date-time }
+        amount: { type: number }
+        paymentStatus: { type: [string, "null"] }
+        settledAt: { type: [string, "null"], format: date-time }
+        settlementSource: { type: [string, "null"], enum: [bank_ledger, transfer_record, null] }
+        paymentReference: { type: [string, "null"] }
+        achTraceNumber: { type: [string, "null"] }
+        bankAccount: { type: [string, "null"] }
+        bankMatchStatus: { type: [string, "null"], enum: [matched, suggested, null] }
+        caveat:
+          type: [string, "null"]
+          description: >
+            Non-null when this line is not safe to present as a settled
+            payment.
+
+    Approver:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Matches `Bill.assignedTo`.
+        name: { type: string }
+        email: { type: string, format: email }
+        role:
+          type: string
+          description: Organization role. Defaults to `Member` when unset.
+
+    SpendSummary:
+      type: object
+      properties:
+        groups:
+          type: array
+          description: >
+            Top 200 groups, ordered by absolute total descending. Uncoded
+            lines appear under `(no vendor)`, `(not well-coded)`, or
+            `(uncoded)` rather than being dropped.
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              total: { type: number }
+              lineCount: { type: integer }
+        truncatedGroupCount:
+          type: integer
+          description: >
+            Groups beyond the top 200. Their spend is still inside
+            `grandTotal`.
+        grandTotal:
+          type: number
+          description: Every group in range, including truncated ones.
+        excludedBillCount:
+          type: integer
+          description: >
+            Bills in range with no line items, which cannot be grouped. When
+            this is non-zero, `grandTotal` understates real spend.
+
+    MissingStatementsSummary:
+      type: object
+      properties:
+        months:
+          type: array
+          description: The months examined, newest first.
+          items: { type: string }
+        generatedAt: { type: string, format: date-time }
+        purchasers:
+          type: array
+          description: >
+            Every purchaser believed to owe a statement. Partly a cadence
+            inference — see `paidNoStatement` for the corroborated subset.
+          items: { $ref: "#/components/schemas/MissingPurchaserGroup" }
+        paidNoStatement:
+          type: array
+          description: >
+            The subset the bank proves: money arrived and nothing was filed
+            against it.
+          items: { $ref: "#/components/schemas/MissingPurchaserGroup" }
+        paidNoStatementTotal: { type: number }
+        neverFiledCount:
+          type: integer
+          description: >
+            Purchasers with no statement on file at all, found from deposits
+            alone.
+        unattributedDeposits:
+          type: [object, "null"]
+          description: >
+            Deposits that name no payer, so they can back no row above.
+            Returned even when zero, because a caller must not read the
+            purchaser list as complete.
+          properties:
+            paper:
+              type: object
+              properties:
+                count: { type: integer }
+                amount: { type: number }
+            unnamed:
+              type: object
+              properties:
+                count: { type: integer }
+                amount: { type: number }
+        caveat:
+          type: string
+          description: >
+            Prose restatement of a non-zero `unattributedDeposits`, present
+            only when it matters. A purchaser who pays by check leaves no
+            descriptor and will never appear as a row.
+
+    MissingPurchaserGroup:
+      type: object
+      properties:
+        purchaserName: { type: string }
+        months:
+          type: array
+          description: Overdue months for this purchaser, newest first.
+          items: { type: string }
+        depositCount: { type: integer }
+        depositTotal: { type: number }
+        neverFiled: { type: boolean }
+        payerKeys:
+          type: array
+          description: >
+            Every distinct payer key the deposits arrived under. Usually one;
+            more when the bank truncated the originator differently across
+            months. A "this payer is that purchaser" rule has to be written
+            for all of them or the un-ruled spelling reappears next month.
+          items: { type: string }
+        descriptorSample:
+          type: [string, "null"]
+          description: One raw bank descriptor, so a human can see what they are ruling on.
+        provisional:
+          type: boolean
+          description: >
+            True when no deposit backing this row has a confirmed purchaser
+            name.
 
     RevenueStatementSummary:
       type: object
