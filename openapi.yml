@@ -1259,6 +1259,24 @@ components:
         description: { type: [string, "null"] }
         amount: { type: [number, "null"] }
         categoryType: { type: [string, "null"] }
+        date:
+          type: [string, "null"]
+          format: date
+          description: >-
+            When the charge on this line occurred, as best the source document
+            says. Month-granularity sources resolve to the first of the month.
+            Read `dateType` before treating this as an accrual date: only
+            `activity_month` and `service_date` come from the line itself;
+            `accounting_month` and `invoice_date` are billing-cycle stand-ins
+            used when the document printed nothing more specific. Never guessed.
+        dateType:
+          type: [string, "null"]
+          enum: [activity_month, service_date, accounting_month, invoice_date, null]
+          description: >-
+            Which date `date` is. `activity_month` — JIB row Activity Month;
+            `service_date` — vendor invoice line service date;
+            `accounting_month` — JIB header Op Accounting Month;
+            `invoice_date` — the bill's invoice date.
         glAccount: { $ref: "#/components/schemas/GlAccountRef" }
         well: { $ref: "#/components/schemas/WellRef" }
         costCenter: { $ref: "#/components/schemas/CostCenterRef" }
