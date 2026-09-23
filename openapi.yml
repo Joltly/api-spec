@@ -126,6 +126,11 @@ paths:
           in: query
           description: Bills with at least one line item coded to this GL account.
           schema: { type: string, maxLength: 100 }
+        - name: labelValueId
+          in: query
+          description: >-
+            Bills with at least one line item carrying this label value (see
+            /line-item-labels). Joltly-only labels; nothing to do with the ERP.
       responses:
         "200":
           description: A page of bills.
@@ -338,6 +343,32 @@ paths:
                     items: { $ref: "#/components/schemas/GlAccount" }
                   pagination: { $ref: "#/components/schemas/Pagination" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /line-item-labels:
+    get:
+      operationId: listLineItemLabels
+      tags: [Bills]
+      summary: List line item label lists
+      description: >-
+        The organization's Joltly-only label lists and their values
+        (Settings → Line Item Labels). Use to resolve ids on bill line items
+        and to pick values when writing `labels` in PUT /bills/{id}/line-items.
+        Archived lists and values are included, flagged, so older line items
+        still resolve. Small enough to return whole; no pagination.
+      responses:
+        "200":
+          description: Every list with its values.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/LineItemLabelList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
@@ -1291,6 +1322,43 @@ components:
             glAccountId: { type: [string, "null"] }
             wellOrAfeId: { type: [string, "null"] }
             alreadyApplied: { type: boolean }
+        labels:
+          type: array
+          description: >-
+            Joltly-only labels on this line (Settings → Line Item Labels), one
+            entry per list the line has a value for. Always present; empty when
+            unlabeled or the feature is off. Never synced to an ERP.
+          items: { $ref: "#/components/schemas/BillLineItemLabel" }
+
+    BillLineItemLabel:
+      type: object
+      required: [listId, valueId]
+      properties:
+        listId: { type: string }
+        listName:
+          type: [string, "null"]
+          description: Null only if the list was deleted after the line was labeled.
+        valueId: { type: string }
+        value:
+          type: [string, "null"]
+          description: The label text as the customer typed it.
+
+    LineItemLabelList:
+      type: object
+      required: [id, name, archived, values]
+      properties:
+        id: { type: string }
+        name: { type: string, description: "Shown as the field label on line items." }
+        archived: { type: boolean }
+        values:
+          type: array
+          items:
+            type: object
+            required: [id, value, archived]
+            properties:
+              id: { type: string }
+              value: { type: string }
+              archived: { type: boolean }
 
     ReplaceBillLineItemsRequest:
       type: object
@@ -1321,6 +1389,15 @@ components:
                 description: Well, field, or operating group id from /cost-centers.
               amount: { type: number }
               memo: { type: [string, "null"] }
+              labels:
+                type: object
+                description: >-
+                  Joltly-only labels: `{ listId: valueId }` from
+                  /line-item-labels. A null value clears that list on the
+                  line; a list not mentioned is left as it was. Ids that do
+                  not exist, or a value from a different list, are a 400 with
+                  `offendingIds`.
+                additionalProperties: { type: [string, "null"] }
 
     CodeBillResult:
       type: object
