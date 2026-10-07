@@ -131,6 +131,12 @@ paths:
           description: >-
             Bills with at least one line item carrying this label value (see
             /line-item-labels). Joltly-only labels; nothing to do with the ERP.
+        - name: historical
+          in: query
+          description: >-
+            true = only bills loaded for the record from the Historical tab;
+            false = only live bills; omitted = both.
+          schema: { type: string, enum: ["true", "false"] }
       responses:
         "200":
           description: A page of bills.
@@ -391,6 +397,12 @@ paths:
         - name: status
           in: query
           schema: { $ref: "#/components/schemas/RevenueStatementStatus" }
+        - name: historical
+          in: query
+          description: >-
+            true = only statements loaded for the record from the Historical
+            tab; false = only live statements; omitted = both.
+          schema: { type: string, enum: ["true", "false"] }
         - name: purchaserName
           in: query
           description: Case-insensitive substring match.
@@ -1229,6 +1241,13 @@ components:
         updatedAt: { type: string, format: date-time }
         invoiceNumber: { type: [string, "null"] }
         invoiceDate: { type: [string, "null"], format: date-time }
+        historical:
+          type: boolean
+          description: >-
+            Loaded for the record from the Historical tab (a non-op back-loading
+            prior periods for analytics). Never submitted, approved, or paid
+            through Joltly; lands as PAID with no paidAt. Status is reported as
+            stored. Filter with `historical=true|false`.
         dueDate:
           type: [string, "null"]
           format: date-time
@@ -1785,6 +1804,11 @@ components:
         purchaserName: { type: [string, "null"] }
         status: { $ref: "#/components/schemas/RevenueStatementStatus" }
         checkDate: { type: [string, "null"], format: date-time }
+        historical:
+          type: boolean
+          description: >-
+            Loaded for the record from the Historical tab; stays DRAFT and is
+            never auto-approved. Filter with `historical=true|false`.
         grossRevenue: { type: [number, "null"] }
         checkTaxes: { type: [number, "null"] }
         checkDeductions: { type: [number, "null"] }
